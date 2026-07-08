@@ -80,16 +80,21 @@ export class P2PHostModal extends LitElement {
       this.roomCode = code;
       this.statusMsg = "Waiting for someone to join...";
 
-      // Set up WebRTC — when signaling relays an offer from peer, accept it
+      // Set up WebRTC — host creates an offer, peer answers
       const pc = createPeerConnection();
-      pc.createDataChannel("game");
+      const dataChannel = pc.createDataChannel("game");
+
+      // Wait for a peer to join the room
+      await sig.waitForPeer();
+
+      // Create the WebRTC offer and send it to the peer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      sig.send({ type: "offer", sdp: offer.sdp ?? "" });
 
       sig.onMessage(async (msg) => {
-        if (msg.type === "offer") {
-          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          sig.send({ type: "answer", sdp: answer.sdp ?? "" });
+        if (msg.type === "answer") {
+          await pc.setRemoteDescription({ type: "answer", sdp: msg.sdp });
         }
         if (msg.type === "candidate" && pc.remoteDescription) {
           await pc.addIceCandidate(msg.candidate).catch(() => {});
@@ -101,15 +106,12 @@ export class P2PHostModal extends LitElement {
           sig.send({ type: "candidate", candidate: e.candidate.toJSON() });
       };
 
-      pc.ondatachannel = (event) => {
-        const channel = event.channel;
+      dataChannel.onopen = () => {
         const clientID = crypto.randomUUID();
-        channel.onopen = () => {
-          host.addPeerConnection(channel, clientID, "Peer");
-          this.peerConnected = true;
-          this.statusMsg = "Peer connected! You can start the game.";
-          this.requestUpdate();
-        };
+        host.addPeerConnection(dataChannel, clientID, "Peer");
+        this.peerConnected = true;
+        this.statusMsg = "Peer connected! You can start the game.";
+        this.requestUpdate();
       };
     } catch (e) {
       this.statusMsg = `Error: ${e}`;
