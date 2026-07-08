@@ -1,19 +1,23 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { P2PPeer } from "../p2p/P2PPeer";
+import { createPeerConnection } from "../p2p/Signaling";
+import { SignalingClient } from "../p2p/SignalingClient";
+import type { JoinLobbyEvent } from "./Main";
 import { p2pContext } from "./P2PContext";
 import { UsernameInput } from "./UsernameInput";
-import type { JoinLobbyEvent } from "./Main";
+
+const SIGNALING_URL = "wss://battle.alice-646.workers.dev";
 
 @customElement("p2p-join-modal")
 export class P2PJoinModal extends LitElement {
   @state() private isOpen = false;
-  @state() private offerInput = "";
-  @state() private step: "input" | "connecting" | "connected" = "input";
+  @state() private codeInput = "";
   @state() private statusMsg = "";
+  @state() private connected = false;
 
   private peer: P2PPeer | null = null;
-  private answerSDP: string | null = null;
+  private sig: SignalingClient | null = null;
 
   createRenderRoot() {
     return this;
@@ -21,60 +25,81 @@ export class P2PJoinModal extends LitElement {
 
   open() {
     this.isOpen = true;
-    this.step = "input";
-    this.offerInput = "";
+    this.codeInput = "";
     this.statusMsg = "";
+    this.connected = false;
     this.peer = null;
-    this.answerSDP = null;
+    this.sig = null;
   }
 
   close() {
     this.isOpen = false;
-    if (this.peer) {
-      this.peer.disconnect();
-      this.peer = null;
-    }
+    this.sig?.close();
   }
 
   private async connect() {
-    if (!this.offerInput.trim()) {
-      this.statusMsg = "Please paste the host's offer first";
+    const code = this.codeInput.trim().toUpperCase();
+    if (!code) {
+      this.statusMsg = "Enter a room code";
       return;
     }
 
-    this.step = "connecting";
     this.statusMsg = "Connecting...";
 
     try {
-      const peer = new P2PPeer();
-      this.answerSDP = await peer.connect(this.offerInput.trim());
-      this.peer = peer;
-      this.step = "connected";
-      this.statusMsg = "Connected! Wait for the host to start the game.";
-      this.requestUpdate();
+      const sig = new SignalingClient(SIGNALING_URL);
+      this.sig = sig;
 
-      // Listen for game start
-      peer.onMessage((msg) => {
-        if (msg.type === "p2p_start") {
-          this.joinGame(peer);
+      const peer = new P2PPeer();
+      this.peer = peer;
+
+      const pc = createPeerConnection();
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate)
+          sig.send({ type: "candidate", candidate: e.candidate.toJSON() });
+      };
+
+      pc.ondatachannel = (event) => {
+        peer.setChannel(event.channel);
+        this.connected = true;
+        this.statusMsg = "Connected! Waiting for host to start...";
+        this.requestUpdate();
+      };
+
+      sig.onMessage(async (msg) => {
+        if (msg.type === "offer") {
+          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sig.send({ type: "answer", sdp: answer.sdp ?? "" });
+        }
+        if (msg.type === "candidate" && pc.remoteDescription) {
+          await pc.addIceCandidate(msg.candidate).catch(() => {});
         }
       });
+
+      await sig.joinRoom(code);
+      this.statusMsg = "Joining...";
+
+      peer.onMessage((msg) => {
+        if (msg.type === "p2p_start") this.joinGame();
+      });
     } catch (e) {
-      this.statusMsg = `Connection failed: ${e}`;
-      this.step = "input";
+      this.statusMsg = `Failed: ${e}`;
     }
   }
 
-  private async joinGame(peer: P2PPeer) {
+  private async joinGame() {
+    const peer = this.peer;
+    if (!peer) return;
+
     const usernameInput = document.querySelector(
       "username-input",
     ) as UsernameInput | null;
     const playerName = usernameInput?.getUsername() ?? "Player";
 
-    // Send join message to host
-    // Store peer in global context before triggering join-lobby
     p2pContext.setPeer(peer);
-
     peer.send({
       type: "p2p_join",
       username: playerName,
@@ -96,12 +121,6 @@ export class P2PJoinModal extends LitElement {
     this.close();
   }
 
-  private copyAnswer() {
-    if (this.answerSDP) {
-      navigator.clipboard.writeText(this.answerSDP).catch(() => {});
-    }
-  }
-
   render() {
     if (!this.isOpen) return html``;
 
@@ -113,7 +132,7 @@ export class P2PJoinModal extends LitElement {
         }}
       >
         <div
-          class="bg-zinc-800 rounded-xl p-6 w-full max-w-md mx-4 text-white shadow-2xl"
+          class="bg-zinc-800 rounded-xl p-6 w-full max-w-sm mx-4 text-white shadow-2xl"
         >
           <div class="flex justify-between items-center mb-4">
             <h2 class="text-lg font-bold">Join P2P Game</h2>
@@ -125,21 +144,22 @@ export class P2PJoinModal extends LitElement {
             </button>
           </div>
 
-          ${this.step === "input"
+          ${!this.connected
             ? html`
                 <div class="space-y-3">
                   <p class="text-sm text-white/70">
-                    Paste the host's connection offer:
+                    Enter the host's room code:
                   </p>
-                  <textarea
-                    .value=${this.offerInput}
+                  <input
+                    type="text"
+                    .value=${this.codeInput}
                     @input=${(e: Event) => {
-                      this.offerInput = (e.target as HTMLTextAreaElement).value;
+                      this.codeInput = (e.target as HTMLInputElement).value;
                     }}
-                    placeholder="Paste SDP offer here..."
-                    rows="6"
-                    class="w-full bg-zinc-700 rounded-lg px-3 py-2 text-xs font-mono resize-none"
-                  ></textarea>
+                    placeholder="e.g. ABC12"
+                    maxlength="5"
+                    class="w-full bg-zinc-700 rounded-lg px-4 py-3 text-lg font-mono font-bold tracking-widest text-center uppercase"
+                  />
                   ${this.statusMsg
                     ? html`<p class="text-sm text-yellow-400">
                         ${this.statusMsg}
@@ -147,43 +167,18 @@ export class P2PJoinModal extends LitElement {
                     : ""}
                   <button
                     @click=${this.connect}
-                    class="w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-500 font-semibold text-sm transition-colors"
+                    class="w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-500 font-semibold text-sm"
                   >
                     Connect
                   </button>
                 </div>
               `
             : html`
-                <div class="space-y-3">
+                <div class="space-y-3 text-center">
                   <p class="text-sm">${this.statusMsg}</p>
-
-                  ${this.answerSDP
-                    ? html`
-                        <div>
-                          <p class="text-xs text-white/50 mb-1">
-                            Send this answer back to the host:
-                          </p>
-                          <textarea
-                            readonly
-                            .value=${this.answerSDP}
-                            rows="4"
-                            class="w-full bg-zinc-900 rounded-lg px-3 py-2 text-xs font-mono text-green-400 resize-none"
-                          ></textarea>
-                          <button
-                            @click=${this.copyAnswer}
-                            class="mt-1 text-xs text-blue-400 hover:text-blue-300"
-                          >
-                            Copy to clipboard
-                          </button>
-                        </div>
-                      `
-                    : ""}
-
-                  ${this.step === "connecting"
-                    ? html`<div
-                        class="w-6 h-6 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mx-auto"
-                      ></div>`
-                    : ""}
+                  <div
+                    class="w-6 h-6 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mx-auto"
+                  ></div>
                 </div>
               `}
         </div>

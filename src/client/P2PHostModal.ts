@@ -8,43 +8,43 @@ import {
   GameType,
 } from "../core/game/Game";
 import { P2PHost } from "../p2p/P2PHost";
+import { createPeerConnection } from "../p2p/Signaling";
+import { SignalingClient } from "../p2p/SignalingClient";
+import type { JoinLobbyEvent } from "./Main";
 import { p2pContext } from "./P2PContext";
 import { UsernameInput } from "./UsernameInput";
-import type { JoinLobbyEvent } from "./Main";
+
+const SIGNALING_URL = "wss://battle.alice-646.workers.dev";
 
 @customElement("p2p-host-modal")
 export class P2PHostModal extends LitElement {
   @state() private isOpen = false;
-  @state() private step: "config" | "waiting" | "connecting" | "playing" = "config";
   @state() private selectedMap: GameMapType = GameMapType.World;
-  @state() private offerSDP = "";
-  @state() private answerInput = "";
-  @state() private peerClientID: string | null = null;
-  @state() private peerCount = 0;
+  @state() private roomCode: string | null = null;
+  @state() private peerConnected = false;
   @state() private statusMsg = "";
 
   private host: P2PHost | null = null;
+  private sig: SignalingClient | null = null;
 
   createRenderRoot() {
     return this;
   }
 
   open() {
-    this.step = "config";
     this.isOpen = true;
     this.selectedMap = GameMapType.World;
-    this.offerSDP = "";
-    this.peerCount = 0;
+    this.roomCode = null;
+    this.peerConnected = false;
     this.statusMsg = "";
     this.host = null;
+    this.sig = null;
   }
 
   close() {
     this.isOpen = false;
-    if (this.host) {
-      this.host.stop();
-      this.host = null;
-    }
+    this.host?.stop();
+    this.sig?.close();
   }
 
   private async startHosting() {
@@ -53,7 +53,7 @@ export class P2PHostModal extends LitElement {
     ) as UsernameInput | null;
     const playerName = usernameInput?.getUsername() ?? "Host";
 
-    this.statusMsg = "Creating game...";
+    this.statusMsg = "Creating room...";
     const host = new P2PHost(
       {
         gameMap: this.selectedMap,
@@ -71,22 +71,46 @@ export class P2PHostModal extends LitElement {
       },
       playerName,
     );
+    this.host = host;
 
     try {
-      const result = await host.createOfferForPeer("peer");
-      this.offerSDP = result.offer;
-      this.peerClientID = result.clientID;
-      this.host = host;
-      this.step = "waiting";
-      this.statusMsg = "Share the offer below, then paste the peer's answer";
+      const sig = new SignalingClient(SIGNALING_URL);
+      this.sig = sig;
+      const code = await sig.createRoom();
+      this.roomCode = code;
+      this.statusMsg = "Waiting for someone to join...";
 
-      host.onEvent((event) => {
-        if (event.type === "peer_joined") {
-          this.peerCount = host.peerCount;
-          this.statusMsg = `${host.peerCount} peer(s) connected — you can start the game`;
-          this.requestUpdate();
+      // Set up WebRTC — when signaling relays an offer from peer, accept it
+      const pc = createPeerConnection();
+      pc.createDataChannel("game");
+
+      sig.onMessage(async (msg) => {
+        if (msg.type === "offer") {
+          await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          sig.send({ type: "answer", sdp: answer.sdp ?? "" });
+        }
+        if (msg.type === "candidate" && pc.remoteDescription) {
+          await pc.addIceCandidate(msg.candidate).catch(() => {});
         }
       });
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate)
+          sig.send({ type: "candidate", candidate: e.candidate.toJSON() });
+      };
+
+      pc.ondatachannel = (event) => {
+        const channel = event.channel;
+        const clientID = crypto.randomUUID();
+        channel.onopen = () => {
+          host.addPeerConnection(channel, clientID, "Peer");
+          this.peerConnected = true;
+          this.statusMsg = "Peer connected! You can start the game.";
+          this.requestUpdate();
+        };
+      };
     } catch (e) {
       this.statusMsg = `Error: ${e}`;
     }
@@ -94,33 +118,26 @@ export class P2PHostModal extends LitElement {
 
   private async startGame() {
     if (!this.host) return;
-
     this.statusMsg = "Starting game...";
-    this.step = "playing";
 
-    // Dispatch join-lobby event
-    const gameID = this.host.gameID;
-    const clientID = this.host.hostClientID;
     const usernameInput = document.querySelector(
       "username-input",
     ) as UsernameInput | null;
     const playerName = usernameInput?.getUsername() ?? "Host";
 
-    // Store host in global context before triggering join-lobby
     p2pContext.setHost(this.host);
-
     this.host.start();
 
     this.dispatchEvent(
       new CustomEvent("join-lobby", {
         detail: {
-          gameID,
+          gameID: this.host.gameID,
           p2pMode: "host",
           gameStartInfo: {
-            gameID,
+            gameID: this.host.gameID,
             players: [
               {
-                clientID,
+                clientID: this.host.hostClientID,
                 username: playerName,
                 clanTag: null,
               },
@@ -149,31 +166,8 @@ export class P2PHostModal extends LitElement {
       }),
     );
 
-    // Begin the turn loop after a short delay to let the client initialize
-    setTimeout(() => {
-      this.host?.beginTurnLoop(100);
-    }, 1000);
-
+    setTimeout(() => this.host?.beginTurnLoop(100), 1000);
     this.close();
-  }
-
-  private async connectPeer() {
-    if (!this.host || !this.peerClientID || !this.answerInput.trim()) return;
-    this.statusMsg = "Connecting peer...";
-    try {
-      await this.host.completePeerConnection(
-        this.peerClientID,
-        this.answerInput.trim(),
-      );
-      this.statusMsg = "Peer connected!";
-      this.requestUpdate();
-    } catch (e) {
-      this.statusMsg = `Connection failed: ${e}`;
-    }
-  }
-
-  private copyOffer() {
-    navigator.clipboard.writeText(this.offerSDP).catch(() => {});
   }
 
   render() {
@@ -187,7 +181,7 @@ export class P2PHostModal extends LitElement {
         }}
       >
         <div
-          class="bg-zinc-800 rounded-xl p-6 w-full max-w-md mx-4 text-white shadow-2xl"
+          class="bg-zinc-800 rounded-xl p-6 w-full max-w-sm mx-4 text-white shadow-2xl"
         >
           <div class="flex justify-between items-center mb-4">
             <h2 class="text-lg font-bold">Host P2P Game</h2>
@@ -199,7 +193,7 @@ export class P2PHostModal extends LitElement {
             </button>
           </div>
 
-          ${this.step === "config"
+          ${!this.roomCode
             ? html`
                 <div class="space-y-3">
                   <label class="block text-sm text-white/70">Map</label>
@@ -219,73 +213,41 @@ export class P2PHostModal extends LitElement {
                     <option value=${GameMapType.Australia}>Australia</option>
                     <option value=${GameMapType.Iceland}>Iceland</option>
                   </select>
-
                   <button
                     @click=${this.startHosting}
-                    class="w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-500 font-semibold text-sm transition-colors"
+                    class="w-full py-3 rounded-lg bg-blue-600 hover:bg-blue-500 font-semibold text-sm"
                   >
                     Start Hosting
                   </button>
                 </div>
               `
             : html`
-                <div class="space-y-3">
+                <div class="space-y-4 text-center">
                   <p class="text-sm text-white/70">${this.statusMsg}</p>
-
-                  ${this.offerSDP
+                  <div class="bg-zinc-900 rounded-xl py-6 px-4">
+                    <p class="text-xs text-white/50 mb-2">
+                      Share this code with a friend:
+                    </p>
+                    <p
+                      class="text-3xl font-mono font-bold tracking-widest text-green-400 select-all"
+                    >
+                      ${this.roomCode}
+                    </p>
+                  </div>
+                  ${this.peerConnected
                     ? html`
-                        <div>
-                          <p class="text-xs text-white/50 mb-1">
-                            1. Share this offer with your friend:
-                          </p>
-                          <textarea
-                            readonly
-                            .value=${this.offerSDP}
-                            rows="4"
-                            class="w-full bg-zinc-900 rounded-lg px-3 py-2 text-xs font-mono text-green-400 resize-none"
-                          ></textarea>
-                          <button
-                            @click=${this.copyOffer}
-                            class="mt-1 text-xs text-blue-400 hover:text-blue-300"
-                          >
-                            Copy to clipboard
-                          </button>
-                        </div>
-                        <div>
-                          <p class="text-xs text-white/50 mb-1">
-                            2. Paste your friend's answer here:
-                          </p>
-                          <textarea
-                            .value=${this.answerInput}
-                            @input=${(e: Event) => {
-                              this.answerInput = (e.target as HTMLTextAreaElement).value;
-                            }}
-                            rows="4"
-                            class="w-full bg-zinc-700 rounded-lg px-3 py-2 text-xs font-mono resize-none"
-                            placeholder="Paste answer from friend..."
-                          ></textarea>
-                          <button
-                            @click=${this.connectPeer}
-                            ?disabled=${!this.answerInput.trim()}
-                            class="mt-1 w-full py-2 rounded-lg bg-blue-600 hover:bg-blue-500 font-semibold text-xs transition-colors disabled:opacity-50"
-                          >
-                            Connect Peer
-                          </button>
-                        </div>
+                        <button
+                          @click=${this.startGame}
+                          class="w-full py-3 rounded-lg bg-green-600 hover:bg-green-500 font-semibold text-sm"
+                        >
+                          Start Game
+                        </button>
                       `
-                    : html`<p class="text-sm">Generating connection offer...</p>`}
-
-                  <p class="text-sm text-white/60">
-                    Peers connected: ${this.peerCount}
-                  </p>
-
-                  <button
-                    @click=${this.startGame}
-                    ?disabled=${this.peerCount < 1}
-                    class="w-full py-3 rounded-lg bg-green-600 hover:bg-green-500 font-semibold text-sm transition-colors disabled:opacity-50"
-                  >
-                    Start Game
-                  </button>
+                    : html`
+                        <div
+                          class="w-6 h-6 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mx-auto"
+                        ></div>
+                      `}
                 </div>
               `}
         </div>

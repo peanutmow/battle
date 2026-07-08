@@ -14,10 +14,7 @@ const gitignorePath = path.resolve(__dirname, ".gitignore");
 export default [
   includeIgnoreFile(gitignorePath),
   {
-    ignores: [
-      "tests/pathfinding/playground/**",
-      ".claude/**",
-    ],
+    ignores: ["tests/pathfinding/playground/**", ".claude/**"],
   },
   { files: ["**/*.{js,mjs,cjs,ts}"] },
   { languageOptions: { globals: { ...globals.browser, ...globals.node } } },
@@ -32,6 +29,7 @@ export default [
             "__mocks__/fileMock.js",
             "eslint.config.js",
             "scripts/sync-assets.mjs",
+            "signaling-worker.js",
           ],
         },
         tsconfigRootDir: import.meta.dirname,
