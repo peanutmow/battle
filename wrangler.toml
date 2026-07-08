@@ -1,3 +1,6 @@
-name = "openfront-signaling"
-main = "signaling-worker.js"
-compatibility_date = "2025-04-01"
+name = "battle"
+main = "battle-worker.js"
+compatibility_date = "2026-07-08"
+compatibility_flags = ["nodejs_compat"]
+
+assets = { directory = "static", not_found_handling = "single-page-application" }

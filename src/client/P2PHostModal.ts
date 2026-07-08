@@ -14,7 +14,7 @@ import type { JoinLobbyEvent } from "./Main";
 import { p2pContext } from "./P2PContext";
 import { UsernameInput } from "./UsernameInput";
 
-const SIGNALING_URL = "wss://openfront-signaling.alice-646.workers.dev";
+const SIGNALING_URL = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
 
 @customElement("p2p-host-modal")
 export class P2PHostModal extends LitElement {
