@@ -24,3 +24,9 @@ tests/perf/output/
 
 # Locally built Go binary (gen-maps uses `go run .`)
 map-generator/map-generator
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
