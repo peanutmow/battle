@@ -4,3 +4,14 @@ compatibility_date = "2026-07-08"
 compatibility_flags = ["nodejs_compat"]
 
 assets = { directory = "static", not_found_handling = "single-page-application" }
+
+[[durable_objects.bindings]]
+name = "SIGNALING_ROOM"
+class_name = "SignalingRoom"
+
+[[durable_objects.hibernatable_classes]]
+name = "SignalingRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalingRoom"]

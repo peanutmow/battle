@@ -1,122 +1,133 @@
 /**
- * battle-worker.js — Combined game proxy + WebSocket signaling relay
+ * battle-worker.js — Combined game assets + WebSocket signaling relay
  *
- * Serves the OpenFront game assets AND handles P2P signaling handshakes
- * on the /connect endpoint, all from a single Cloudflare Worker.
- *
- * Deploy with:
- *   wrangler deploy --assets static/
+ * Uses a Durable Object with WebSocket Hibernation to reliably route
+ * messages between host and peer across Cloudflare Workers isolates.
  */
 
 /* global WebSocketPair */
 
-// ── Signaling relay ─────────────────────────────────────────────────
+const ROOM_CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
-const rooms = new Map();
+// ── Signaling Durable Object ─────────────────────────────────────────
 
-function generateCode() {
-  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let code;
-  do {
-    code = "";
-    for (let i = 0; i < 5; i++)
-      code += chars[Math.floor(Math.random() * chars.length)];
-  } while (rooms.has(code));
-  return code;
-}
-
-async function handleSignaling(request, env) {
-  const url = new URL(request.url);
-
-  // Status endpoint
-  if (url.pathname === "/status") {
-    return new Response(JSON.stringify({ ok: true, rooms: rooms.size }), {
-      headers: { "Content-Type": "application/json" },
-    });
+export class SignalingRoom {
+  constructor(ctx, env) {
+    this.ctx = ctx;
+    this.env = env;
+    // WebSocket tags: "host" and "peer"
   }
 
-  // WebSocket upgrade
-  if (url.pathname === "/connect") {
+  async fetch(request) {
+    const url = new URL(request.url);
     const role = url.searchParams.get("role");
     let room = url.searchParams.get("room");
 
     if (!role || (role !== "host" && role !== "peer")) {
-      return new Response("Missing or invalid ?role=host|peer", {
-        status: 400,
-      });
-    }
-
-    if (role === "host" && !room) {
-      room = generateCode();
-    }
-
-    if (!room) {
-      return new Response("Missing ?room=CODE", { status: 400 });
+      return new Response("Invalid role", { status: 400 });
     }
 
     const webSocketPair = new WebSocketPair();
     const client = webSocketPair[0];
     const ws = webSocketPair[1];
-    ws.accept();
 
-    let roomData = rooms.get(room);
-    if (!roomData) {
-      roomData = { host: null, peer: null, createdAt: Date.now() };
-      rooms.set(room, roomData);
-    }
+    // Accept the WebSocket (Hibernation API)
+    this.ctx.acceptWebSocket(ws, [role]);
 
     if (role === "host") {
-      if (roomData.host) {
-        ws.close(4001, "Room already has a host");
-        return new Response(null, { status: 101, webSocket: client });
-      }
-      roomData.host = ws;
       ws.send(JSON.stringify({ type: "room_code", code: room }));
     } else {
-      if (roomData.peer) {
-        ws.close(4002, "Room already has a peer");
-        return new Response(null, { status: 101, webSocket: client });
-      }
-      if (!roomData.host) {
+      // Notify host that a peer joined
+      const hostSockets = this.ctx.getWebSockets("host");
+      if (hostSockets.length === 0) {
         ws.close(4003, "Room has no host yet");
         return new Response(null, { status: 101, webSocket: client });
       }
-      roomData.peer = ws;
-      roomData.host.send(JSON.stringify({ type: "peer_joined" }));
+      hostSockets[0].send(JSON.stringify({ type: "peer_joined" }));
     }
-
-    ws.addEventListener("message", (event) => {
-      try {
-        JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      const target = role === "host" ? roomData.peer : roomData.host;
-      if (target && target.readyState === 1) {
-        target.send(event.data);
-      }
-    });
-
-    const cleanup = () => {
-      if (role === "host") roomData.host = null;
-      else roomData.peer = null;
-      if (!roomData.host && !roomData.peer) {
-        rooms.delete(room);
-      }
-    };
-
-    ws.addEventListener("close", cleanup);
-    ws.addEventListener("error", cleanup);
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // Not a signaling path — fall through to static assets
-  return env.assets.fetch(request);
+  async webSocketMessage(ws, message) {
+    const tags = this.ctx.getTags(ws);
+    const role = tags[0];
+    const targetTag = role === "host" ? "peer" : "host";
+    const targets = this.ctx.getWebSockets(targetTag);
+    for (const target of targets) {
+      try {
+        target.send(message);
+      } catch {
+        // Ignore send errors (peer may have disconnected)
+      }
+    }
+  }
+
+  async webSocketClose(_ws) {
+    // WebSocket closed — nothing extra to do
+    return; // satisfy lint
+  }
+
+  static generateCode() {
+    let code = "";
+    for (let i = 0; i < 5; i++)
+      code +=
+        ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)];
+    return code;
+  }
 }
 
+// ── Fetch handler ────────────────────────────────────────────────────
+
 export default {
-  fetch(request, env) {
-    return handleSignaling(request, env);
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    // Status endpoint
+    if (url.pathname === "/status") {
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    // WebSocket upgrade — route through Durable Object
+    if (url.pathname === "/connect") {
+      const role = url.searchParams.get("role");
+      let room = url.searchParams.get("room");
+
+      if (!role || (role !== "host" && role !== "peer")) {
+        return new Response("Missing or invalid ?role=host|peer", {
+          status: 400,
+        });
+      }
+
+      if (role === "host" && !room) {
+        room = generateCode();
+      }
+
+      if (!room) {
+        return new Response("Missing ?room=CODE", { status: 400 });
+      }
+
+      // Forward to the Durable Object for this room, ensuring room code
+      // is in the request URL so the DO knows which room this is for
+      const doId = env.SIGNALING_ROOM.idFromName(room);
+      const stub = env.SIGNALING_ROOM.get(doId);
+      const doUrl = new URL(request.url);
+      doUrl.searchParams.set("room", room);
+      return stub.fetch(new Request(doUrl.toString(), request));
+    }
+
+    // Not a signaling path — serve static assets
+    return env.assets.fetch(request);
   },
 };
+
+// ── Helper ───────────────────────────────────────────────────────────
+
+function generateCode() {
+  let code = "";
+  for (let i = 0; i < 5; i++)
+    code += ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)];
+  return code;
+}
