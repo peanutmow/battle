@@ -4,6 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 import { createHtmlPlugin } from "vite-plugin-html";
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -30,27 +32,24 @@ export default defineConfig(({ mode }) => {
       },
     },
 
-    plugins: [
-      createHtmlPlugin({
-        minify: false,
-        entry: "/src/client/Main.ts",
-        template: "index.html",
-        inject: {
-          data: {
-            gitCommit: JSON.stringify("DEV"),
-            assetManifest: JSON.stringify({}),
-            cdnBase: JSON.stringify(cdnBase),
-            gameEnv: JSON.stringify("dev"),
-            numWorkers: JSON.stringify(2),
-            turnstileSiteKey: JSON.stringify("1x00000000000000000000AA"),
-            jwtAudience: JSON.stringify("localhost"),
-            instanceId: JSON.stringify("DEV_ID"),
-            ...htmlAssetData,
-          },
+    plugins: [createHtmlPlugin({
+      minify: false,
+      entry: "/src/client/Main.ts",
+      template: "index.html",
+      inject: {
+        data: {
+          gitCommit: JSON.stringify("DEV"),
+          assetManifest: JSON.stringify({}),
+          cdnBase: JSON.stringify(cdnBase),
+          gameEnv: JSON.stringify("dev"),
+          numWorkers: JSON.stringify(2),
+          turnstileSiteKey: JSON.stringify("1x00000000000000000000AA"),
+          jwtAudience: JSON.stringify("localhost"),
+          instanceId: JSON.stringify("DEV_ID"),
+          ...htmlAssetData,
         },
-      }),
-      tailwindcss(),
-    ],
+      },
+    }), tailwindcss(), cloudflare()],
 
     define: {
       __ASSET_MANIFEST__: JSON.stringify({}),
