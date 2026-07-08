@@ -1,12 +1,5 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
-import {
-  Difficulty,
-  GameMapSize,
-  GameMapType,
-  GameMode,
-  GameType,
-} from "../core/game/Game";
 import { P2PPeer } from "../p2p/P2PPeer";
 import { createPeerConnection } from "../p2p/Signaling";
 import { SignalingClient } from "../p2p/SignalingClient";
@@ -14,7 +7,6 @@ import type { P2PPlayerInfo } from "../p2p/types";
 import type { JoinLobbyEvent } from "./Main";
 import { p2pContext } from "./P2PContext";
 import "./P2PLobbyScreen";
-import type { P2PLobbyConfig } from "./P2PLobbyScreen";
 import { UsernameInput } from "./UsernameInput";
 
 const SIGNALING_URL = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
@@ -37,14 +29,34 @@ export class P2PJoinModal extends LitElement {
     return this;
   }
 
-  open() {
+  connectedCallback() {
+    super.connectedCallback();
+    // Check URL for ?p2p_join=CODE to auto-open
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("p2p_join");
+    if (code) {
+      this.open(code);
+    }
+  }
+
+  open(prefilledCode?: string) {
     this.phase = "form";
-    this.codeInput = "";
+    this.codeInput = prefilledCode ?? "";
     this.statusMsg = "";
     this.roomCode = "";
     this.players = [];
     this.peer = null;
     this.sig = null;
+
+    // If a code was prefilled and there's no local game state, auto-connect
+    // after a brief delay to let the UI settle
+    if (prefilledCode) {
+      setTimeout(() => {
+        if (this.phase === "form" && this.codeInput) {
+          this.connect();
+        }
+      }, 500);
+    }
   }
 
   close() {
@@ -99,6 +111,12 @@ export class P2PJoinModal extends LitElement {
         this.phase = "lobby";
         this.statusMsg = "Connected! Waiting for host to start...";
         this.requestUpdate();
+        // Send real username immediately so the host shows the right name
+        peer.send({
+          type: "p2p_join",
+          username: this.playerName,
+          clientID: peer.clientID ?? "",
+        });
       };
 
       sig.onMessage(async (msg: any) => {
@@ -159,24 +177,6 @@ export class P2PJoinModal extends LitElement {
     );
 
     this.close();
-  }
-
-  private defaultConfig(): P2PLobbyConfig {
-    return {
-      gameMap: GameMapType.World,
-      gameMapSize: GameMapSize.Normal,
-      gameType: GameType.Singleplayer,
-      gameMode: GameMode.FFA,
-      difficulty: Difficulty.Medium,
-      bots: 3,
-      nations: "default",
-      infiniteGold: false,
-      infiniteTroops: false,
-      instantBuild: false,
-      donateGold: false,
-      donateTroops: false,
-      randomSpawn: false,
-    };
   }
 
   render() {
@@ -279,10 +279,13 @@ export class P2PJoinModal extends LitElement {
                 <p2p-lobby-screen
                   .isHost=${false}
                   .roomCode=${this.roomCode}
-                  .players=${this.players}
-                  .config=${this.defaultConfig()}
                   .statusMsg=${this.statusMsg}
                   .canStart=${false}
+                  .clients=${this.players.map((p) => ({
+                    clientID: p.clientID,
+                    username: p.username,
+                    clanTag: null,
+                  }))}
                   .onLeave=${() => this.close()}
                 ></p2p-lobby-screen>
               </div>

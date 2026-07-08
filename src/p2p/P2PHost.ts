@@ -75,6 +75,13 @@ export class P2PHost {
         const msg: P2PMessage = JSON.parse(event.data);
         if (msg.type === "p2p_intent") {
           this._intents.push({ ...msg.intent, clientID } as StampedIntent);
+        } else if (msg.type === "p2p_join") {
+          // Peer sent their real username — update it
+          const newName = msg.username || username;
+          peer.username = newName;
+          const p = this.players.find((p) => p.clientID === clientID);
+          if (p) p.username = newName;
+          this.emitEvent({ type: "peer_joined", clientID, username: newName });
         }
       } catch {
         /* ignore */
