@@ -28,12 +28,12 @@ import {
   Winner,
 } from "../core/Schemas";
 import { replacer } from "../core/Util";
-import { getPlayToken } from "./Auth";
-import { LobbyConfig } from "./ClientGameRunner";
-import { LocalServer } from "./LocalServer";
 import { P2PHost } from "../p2p/P2PHost";
 import { P2PPeer } from "../p2p/P2PPeer";
 import type { P2PMessage } from "../p2p/types";
+import { getPlayToken } from "./Auth";
+import { LobbyConfig } from "./ClientGameRunner";
+import { LocalServer } from "./LocalServer";
 import { PlayerView } from "./view";
 
 export class PauseGameIntentEvent implements GameEvent {
@@ -356,9 +356,10 @@ export class Transport {
   ) {
     this.onconnect = onconnect;
     this.onmessage = onmessage;
-    // The P2PHost is provided externally (set from outside)
-    // When the host starts the game, it will trigger onconnect
     console.log("P2P Host transport ready");
+
+    // Immediately trigger onconnect so the join flow starts
+    onconnect();
   }
 
   /**
@@ -529,14 +530,16 @@ export class Transport {
     } satisfies ClientRejoinMessage);
   }
 
-  leaveGame() {    if (this.isP2PHost && this.p2pHost) {
+  leaveGame() {
+    if (this.isP2PHost && this.p2pHost) {
       this.p2pHost.stop();
       return;
     }
     if (this.isP2PPeer && this.p2pPeer) {
       this.p2pPeer.disconnect();
       return;
-    }    if (this.isLocal) {
+    }
+    if (this.isLocal) {
       this.localServer.endGame();
       return;
     }
@@ -813,6 +816,22 @@ export class Transport {
         this.p2pHost.handleIntent({
           ...msg.intent,
           clientID: this.p2pHost.hostClientID,
+        } as any);
+      }
+      // Simulate server responses for P2P host
+      if (msg.type === "join") {
+        // Simulate prestart so the terrain loads
+        this.onmessage({
+          type: "prestart",
+          gameMap: this.lobbyConfig.gameStartInfo?.config.gameMap ?? 0,
+          gameMapSize: this.lobbyConfig.gameStartInfo?.config.gameMapSize ?? 1,
+        } as any);
+        // Simulate start so the game actually begins
+        this.onmessage({
+          type: "start",
+          myClientID: this.p2pHost.hostClientID,
+          gameStartInfo: this.lobbyConfig.gameStartInfo,
+          lobbyCreatedAt: Date.now(),
         } as any);
       }
       return;
