@@ -19,11 +19,11 @@ import { UsernameInput } from "./UsernameInput";
 
 const SIGNALING_URL = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
 
-type JoinPhase = "form" | "connecting" | "lobby";
+type JoinPhase = "hidden" | "form" | "connecting" | "lobby";
 
 @customElement("p2p-join-modal")
 export class P2PJoinModal extends LitElement {
-  @state() private phase: JoinPhase = "form";
+  @state() private phase: JoinPhase = "hidden";
   @state() private codeInput = "";
   @state() private statusMsg = "";
   @state() private roomCode = "";
@@ -48,7 +48,7 @@ export class P2PJoinModal extends LitElement {
   }
 
   close() {
-    this.phase = "form";
+    this.phase = "hidden";
     this.sig?.close();
   }
 
@@ -180,6 +180,7 @@ export class P2PJoinModal extends LitElement {
   }
 
   render() {
+    if (this.phase === "hidden") return html``;
     return html`
       <!-- Join form -->
       ${this.phase === "form"

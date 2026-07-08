@@ -26,11 +26,11 @@ interface PeerConnection {
   connected: boolean;
 }
 
-type HostPhase = "setup" | "connecting" | "lobby";
+type HostPhase = "hidden" | "setup" | "connecting" | "lobby";
 
 @customElement("p2p-host-modal")
 export class P2PHostModal extends LitElement {
-  @state() private phase: HostPhase = "setup";
+  @state() private phase: HostPhase = "hidden";
   @state() private selectedMap: GameMapType = GameMapType.World;
   @state() private roomCode = "";
   @state() private statusMsg = "";
@@ -62,7 +62,7 @@ export class P2PHostModal extends LitElement {
   }
 
   close() {
-    this.phase = "setup";
+    this.phase = "hidden";
     this.host?.stop();
     this.sig?.close();
     for (const [, p] of this.peerConnections) p.pc.close();
@@ -300,6 +300,7 @@ export class P2PHostModal extends LitElement {
   }
 
   render() {
+    if (this.phase === "hidden") return html``;
     return html`
       <div
         class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 ${this
