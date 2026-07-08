@@ -45,6 +45,8 @@ import { MatchmakingModal } from "./Matchmaking";
 import { modalRouter } from "./ModalRouter";
 import { initNavigation } from "./Navigation";
 import "./NewsModal";
+import "./P2PHostModal";
+import "./P2PJoinModal";
 import "./PatternInput";
 import "./SinglePlayerModal";
 import { StoreModal } from "./Store";
@@ -243,8 +245,10 @@ export interface JoinLobbyEvent {
   gameStartInfo?: GameStartInfo;
   // GameRecord exists when replaying an archived game.
   gameRecord?: GameRecord;
-  source?: "public" | "private" | "host" | "matchmaking" | "singleplayer";
+  source?: "public" | "private" | "host" | "matchmaking" | "singleplayer" | "p2p_host" | "p2p_peer";
   publicLobbyInfo?: GameInfo | PublicGameInfo;
+  // P2P mode
+  p2pMode?: "host" | "peer";
 }
 
 class Client {
@@ -856,6 +860,7 @@ class Client {
       playerRole,
       gameStartInfo: lobby.gameStartInfo ?? lobby.gameRecord?.info,
       gameRecord: lobby.gameRecord,
+      p2pMode: lobby.p2pMode,
     });
 
     if (this.mostRecentJoinEvent !== event.timeStamp) {

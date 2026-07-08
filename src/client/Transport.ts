@@ -31,6 +31,9 @@ import { replacer } from "../core/Util";
 import { getPlayToken } from "./Auth";
 import { LobbyConfig } from "./ClientGameRunner";
 import { LocalServer } from "./LocalServer";
+import { P2PHost } from "../p2p/P2PHost";
+import { P2PPeer } from "../p2p/P2PPeer";
+import type { P2PMessage } from "../p2p/types";
 import { PlayerView } from "./view";
 
 export class PauseGameIntentEvent implements GameEvent {
@@ -187,6 +190,8 @@ export class Transport {
   private socket: WebSocket | null = null;
 
   private localServer: LocalServer;
+  private p2pHost: P2PHost | null = null;
+  private p2pPeer: P2PPeer | null = null;
 
   private buffer: string[] = [];
 
@@ -195,6 +200,8 @@ export class Transport {
 
   private pingInterval: number | null = null;
   public readonly isLocal: boolean;
+  public readonly isP2PHost: boolean;
+  public readonly isP2PPeer: boolean;
 
   constructor(
     private lobbyConfig: LobbyConfig,
@@ -205,6 +212,8 @@ export class Transport {
     this.isLocal =
       lobbyConfig.gameRecord !== undefined ||
       lobbyConfig.gameStartInfo?.config.gameType === GameType.Singleplayer;
+    this.isP2PHost = lobbyConfig.p2pMode === "host";
+    this.isP2PPeer = lobbyConfig.p2pMode === "peer";
 
     this.eventBus.on(SendAllianceRequestIntentEvent, (e) =>
       this.onSendAllianceRequest(e),
@@ -301,7 +310,11 @@ export class Transport {
     onconnect: () => void,
     onmessage: (message: ServerMessage) => void,
   ) {
-    if (this.isLocal) {
+    if (this.isP2PPeer) {
+      this.connectP2PPeer(onconnect, onmessage);
+    } else if (this.isP2PHost) {
+      this.connectP2PHost(onconnect, onmessage);
+    } else if (this.isLocal) {
       this.connectLocal(onconnect, onmessage);
     } else {
       this.connectRemote(onconnect, onmessage);
@@ -312,7 +325,11 @@ export class Transport {
     onconnect: () => void,
     onmessage: (message: ServerMessage) => void,
   ) {
-    if (this.isLocal) {
+    if (this.isP2PHost && this.p2pHost) {
+      // For P2P host, the connection callback is already set up
+      this.onconnect = onconnect;
+      this.onmessage = onmessage;
+    } else if (this.isLocal) {
       this.localServer.updateCallback(onconnect, onmessage);
     } else {
       this.onconnect = onconnect;
@@ -331,6 +348,87 @@ export class Transport {
     );
     this.localServer.updateCallback(onconnect, onmessage);
     this.localServer.start();
+  }
+
+  private connectP2PHost(
+    onconnect: () => void,
+    onmessage: (message: ServerMessage) => void,
+  ) {
+    this.onconnect = onconnect;
+    this.onmessage = onmessage;
+    // The P2PHost is provided externally (set from outside)
+    // When the host starts the game, it will trigger onconnect
+    console.log("P2P Host transport ready");
+  }
+
+  /**
+   * Set the P2PHost instance for host mode.
+   * Called externally after creating the P2PHost.
+   */
+  setP2PHost(host: P2PHost): void {
+    this.p2pHost = host;
+  }
+
+  /**
+   * Set the P2PPeer instance for peer mode.
+   * Called externally after connecting to a host.
+   */
+  setP2PPeer(peer: P2PPeer): void {
+    this.p2pPeer = peer;
+  }
+
+  private connectP2PPeer(
+    onconnect: () => void,
+    onmessage: (message: ServerMessage) => void,
+  ) {
+    this.onconnect = onconnect;
+    this.onmessage = onmessage;
+
+    if (!this.p2pPeer) {
+      console.error("P2P Peer not set");
+      return;
+    }
+
+    // Listen for messages from the host via P2PPeer
+    this.p2pPeer.onMessage((msg: P2PMessage) => {
+      // Map P2P messages to ServerMessage-compatible format
+      switch (msg.type) {
+        case "p2p_lobby_info":
+          this.onmessage({
+            type: "lobby_info",
+            lobby: {
+              gameConfig: this.lobbyConfig.gameStartInfo?.config ?? {},
+              clients: msg.players.map((p) => ({
+                clientID: p.clientID,
+                persistentID: p.clientID,
+                username: p.username,
+                connected: p.connected,
+              })),
+            },
+            myClientID: msg.hostPlayer.clientID,
+          } as any);
+          break;
+        case "p2p_start":
+          console.log("P2P: game starting", msg.gameStartInfo);
+          this.lobbyConfig.gameStartInfo = msg.gameStartInfo;
+          this.onmessage({
+            type: "start",
+            gameStartInfo: msg.gameStartInfo,
+            turns: msg.turns,
+            lobbyCreatedAt: Date.now(),
+            myClientID: this.p2pPeer?.clientID ?? undefined,
+          } as any);
+          break;
+        case "p2p_turn":
+          this.onmessage({
+            type: "turn",
+            turn: msg.turn,
+          } as any);
+          break;
+      }
+    });
+
+    this.onconnect();
   }
 
   private connectRemote(
@@ -401,7 +499,9 @@ export class Transport {
   }
 
   public turnComplete() {
-    if (this.isLocal) {
+    if (this.isP2PHost && this.p2pHost) {
+      this.p2pHost.endTurn();
+    } else if (this.isLocal) {
       this.localServer.turnComplete();
     }
   }
@@ -429,8 +529,14 @@ export class Transport {
     } satisfies ClientRejoinMessage);
   }
 
-  leaveGame() {
-    if (this.isLocal) {
+  leaveGame() {    if (this.isP2PHost && this.p2pHost) {
+      this.p2pHost.stop();
+      return;
+    }
+    if (this.isP2PPeer && this.p2pPeer) {
+      this.p2pPeer.disconnect();
+      return;
+    }    if (this.isLocal) {
       this.localServer.endGame();
       return;
     }
@@ -582,8 +688,17 @@ export class Transport {
     });
   }
 
+  private canSendToServer(): boolean {
+    return (
+      this.isLocal ||
+      this.isP2PHost ||
+      this.isP2PPeer ||
+      this.socket?.readyState === WebSocket.OPEN
+    );
+  }
+
   private onSendWinnerEvent(event: SendWinnerEvent) {
-    if (this.isLocal || this.socket?.readyState === WebSocket.OPEN) {
+    if (this.canSendToServer()) {
       this.sendMsg({
         type: "winner",
         winner: event.winner,
@@ -599,7 +714,7 @@ export class Transport {
   }
 
   private onSendLiveStatsEvent(event: SendLiveStatsEvent) {
-    if (this.isLocal || this.socket?.readyState === WebSocket.OPEN) {
+    if (this.canSendToServer()) {
       this.sendMsg({
         type: "live_stats",
         stats: event.stats,
@@ -608,7 +723,7 @@ export class Transport {
   }
 
   private onSendHashEvent(event: SendHashEvent) {
-    if (this.isLocal || this.socket?.readyState === WebSocket.OPEN) {
+    if (this.canSendToServer()) {
       this.sendMsg({
         type: "hash",
         turnNumber: event.tick,
@@ -671,7 +786,12 @@ export class Transport {
   }
 
   private sendIntent(intent: Intent) {
-    if (this.isLocal || this.socket?.readyState === WebSocket.OPEN) {
+    const canSend =
+      this.isLocal ||
+      this.isP2PHost ||
+      this.socket?.readyState === WebSocket.OPEN ||
+      (this.isP2PPeer && this.p2pPeer !== null);
+    if (canSend) {
       const msg = {
         type: "intent",
         intent: intent,
@@ -687,6 +807,26 @@ export class Transport {
   }
 
   private sendMsg(msg: ClientMessage) {
+    if (this.isP2PHost && this.p2pHost) {
+      // For P2P host, forward intents to the P2PHost
+      if (msg.type === "intent") {
+        this.p2pHost.handleIntent({
+          ...msg.intent,
+          clientID: this.p2pHost.hostClientID,
+        } as any);
+      }
+      return;
+    }
+    if (this.isP2PPeer && this.p2pPeer) {
+      // For P2P peer, send via WebRTC DataChannel
+      if (msg.type === "intent") {
+        this.p2pPeer.send({
+          type: "p2p_intent",
+          intent: msg.intent,
+        });
+      }
+      return;
+    }
     if (this.isLocal) {
       // Forward message to local server
       this.localServer.onMessage(msg);

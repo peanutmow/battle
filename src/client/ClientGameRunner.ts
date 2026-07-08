@@ -49,6 +49,7 @@ import {
   ToggleRenderDebugGuiEvent,
 } from "./InputHandler";
 import { endGame, startGame, startTime } from "./LocalPersistantStats";
+import { p2pContext } from "./P2PContext";
 import { terrainMapFileLoader } from "./TerrainMapFileLoader";
 import { GoToPlayerEvent } from "./TransformHandler";
 import {
@@ -97,6 +98,8 @@ export interface LobbyConfig {
   gameStartInfo?: GameStartInfo;
   // GameRecord exists when replaying an archived game.
   gameRecord?: GameRecord;
+  // P2P mode for decentralized multiplayer
+  p2pMode?: "host" | "peer";
 }
 
 export interface JoinLobbyResult {
@@ -124,6 +127,19 @@ export function joinLobby(
   startGame(lobbyConfig.gameID, lobbyConfig.gameStartInfo?.config ?? {});
 
   const transport = new Transport(lobbyConfig, eventBus);
+
+  // Set up P2P transport mode if applicable
+  if (lobbyConfig.p2pMode === "host") {
+    const host = p2pContext.getHost();
+    if (host) {
+      transport.setP2PHost(host);
+    }
+  } else if (lobbyConfig.p2pMode === "peer") {
+    const peer = p2pContext.getPeer();
+    if (peer) {
+      transport.setP2PPeer(peer);
+    }
+  }
 
   let currentGameRunner: ClientGameRunner | null = null;
 
@@ -253,6 +269,7 @@ export function joinLobby(
       } else {
         transport.leaveGame();
       }
+      p2pContext.clear();
       return true;
     },
     prestart: prestartPromise,
