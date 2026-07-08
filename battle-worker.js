@@ -31,41 +31,95 @@ export class SignalingRoom {
     const client = webSocketPair[0];
     const ws = webSocketPair[1];
 
-    // Accept the WebSocket (Hibernation API)
-    this.ctx.acceptWebSocket(ws, [role]);
-
     if (role === "host") {
+      // Host connects — accept and send room code
+      this.ctx.acceptWebSocket(ws, ["host"]);
       ws.send(JSON.stringify({ type: "room_code", code: room }));
     } else {
-      // Notify host that a peer joined
+      // Peer connects — generate unique peer ID
+      const peerId = crypto.randomUUID().slice(0, 8);
+      this.ctx.acceptWebSocket(ws, ["peer", peerId]);
+
+      // Notify host that a new peer joined
       const hostSockets = this.ctx.getWebSockets("host");
       if (hostSockets.length === 0) {
         ws.close(4003, "Room has no host yet");
         return new Response(null, { status: 101, webSocket: client });
       }
-      hostSockets[0].send(JSON.stringify({ type: "peer_joined" }));
+      hostSockets[0].send(JSON.stringify({ type: "peer_joined", peerId }));
+
+      // Send the peer their ID so they can tag outgoing messages
+      ws.send(JSON.stringify({ type: "peer_id", peerId }));
     }
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws, message) {
+    let parsed;
+    try {
+      parsed = JSON.parse(message);
+    } catch {
+      return;
+    }
     const tags = this.ctx.getTags(ws);
     const role = tags[0];
-    const targetTag = role === "host" ? "peer" : "host";
-    const targets = this.ctx.getWebSockets(targetTag);
-    for (const target of targets) {
-      try {
-        target.send(message);
-      } catch {
-        // Ignore send errors (peer may have disconnected)
+
+    if (role === "host") {
+      // Host sending — route to a specific peer by targetPeer field
+      const targetPeerId = parsed.targetPeer;
+      if (targetPeerId) {
+        const peers = this.ctx.getWebSockets("peer");
+        for (const p of peers) {
+          const pTags = this.ctx.getTags(p);
+          if (pTags[1] === targetPeerId) {
+            try {
+              p.send(message);
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+        }
+      } else {
+        // No targetPeer specified — broadcast to all peers
+        const peers = this.ctx.getWebSockets("peer");
+        for (const p of peers) {
+          try {
+            p.send(message);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    } else {
+      // Peer sending — route to host
+      const hostSockets = this.ctx.getWebSockets("host");
+      for (const h of hostSockets) {
+        try {
+          h.send(message);
+        } catch {
+          /* ignore */
+        }
       }
     }
   }
 
-  async webSocketClose(_ws) {
-    // WebSocket closed — nothing extra to do
-    return; // satisfy lint
+  async webSocketClose(ws) {
+    const tags = this.ctx.getTags(ws);
+    const role = tags[0];
+    // Notify host that a peer disconnected
+    if (role === "peer") {
+      const peerId = tags[1];
+      const hostSockets = this.ctx.getWebSockets("host");
+      for (const h of hostSockets) {
+        try {
+          h.send(JSON.stringify({ type: "peer_left", peerId }));
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   }
 
   static generateCode() {

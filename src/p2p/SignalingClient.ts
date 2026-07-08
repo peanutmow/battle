@@ -12,10 +12,17 @@
 
 export type SignalMessage =
   | { type: "room_code"; code: string }
-  | { type: "peer_joined" }
-  | { type: "offer"; sdp: string }
-  | { type: "answer"; sdp: string }
-  | { type: "candidate"; candidate: RTCIceCandidateInit };
+  | { type: "peer_id"; peerId: string }
+  | { type: "peer_joined"; peerId?: string }
+  | { type: "peer_left"; peerId?: string }
+  | { type: "offer"; sdp: string; targetPeer?: string; peerId?: string }
+  | { type: "answer"; sdp: string; targetPeer?: string; peerId?: string }
+  | {
+      type: "candidate";
+      candidate: RTCIceCandidateInit;
+      targetPeer?: string;
+      peerId?: string;
+    };
 
 export class SignalingClient {
   private ws: WebSocket | null = null;

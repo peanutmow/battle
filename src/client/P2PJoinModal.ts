@@ -1,39 +1,54 @@
 import { html, LitElement } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import {
+  Difficulty,
+  GameMapSize,
+  GameMapType,
+  GameMode,
+  GameType,
+} from "../core/game/Game";
 import { P2PPeer } from "../p2p/P2PPeer";
 import { createPeerConnection } from "../p2p/Signaling";
 import { SignalingClient } from "../p2p/SignalingClient";
+import type { P2PPlayerInfo } from "../p2p/types";
 import type { JoinLobbyEvent } from "./Main";
 import { p2pContext } from "./P2PContext";
+import "./P2PLobbyScreen";
+import type { P2PLobbyConfig } from "./P2PLobbyScreen";
 import { UsernameInput } from "./UsernameInput";
 
 const SIGNALING_URL = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}`;
 
+type JoinPhase = "form" | "connecting" | "lobby";
+
 @customElement("p2p-join-modal")
 export class P2PJoinModal extends LitElement {
-  @state() private isOpen = false;
+  @state() private phase: JoinPhase = "form";
   @state() private codeInput = "";
   @state() private statusMsg = "";
-  @state() private connected = false;
+  @state() private roomCode = "";
+  @state() private players: P2PPlayerInfo[] = [];
 
   private peer: P2PPeer | null = null;
   private sig: SignalingClient | null = null;
+  private playerName = "";
 
   createRenderRoot() {
     return this;
   }
 
   open() {
-    this.isOpen = true;
+    this.phase = "form";
     this.codeInput = "";
     this.statusMsg = "";
-    this.connected = false;
+    this.roomCode = "";
+    this.players = [];
     this.peer = null;
     this.sig = null;
   }
 
   close() {
-    this.isOpen = false;
+    this.phase = "form";
     this.sig?.close();
   }
 
@@ -44,6 +59,13 @@ export class P2PJoinModal extends LitElement {
       return;
     }
 
+    const usernameInput = document.querySelector(
+      "username-input",
+    ) as UsernameInput | null;
+    this.playerName = usernameInput?.getUsername() ?? "Player";
+
+    this.phase = "connecting";
+    this.roomCode = code;
     this.statusMsg = "Connecting...";
 
     try {
@@ -54,25 +76,44 @@ export class P2PJoinModal extends LitElement {
       this.peer = peer;
 
       const pc = createPeerConnection();
+      let myPeerId = "";
 
       pc.onicecandidate = (e) => {
         if (e.candidate)
-          sig.send({ type: "candidate", candidate: e.candidate.toJSON() });
+          sig.send({
+            type: "candidate",
+            candidate: e.candidate.toJSON(),
+            peerId: myPeerId,
+          });
       };
 
       pc.ondatachannel = (event) => {
         peer.setChannel(event.channel);
-        this.connected = true;
+        this.players = [
+          {
+            clientID: peer.clientID ?? "",
+            username: this.playerName,
+            connected: true,
+          },
+        ];
+        this.phase = "lobby";
         this.statusMsg = "Connected! Waiting for host to start...";
         this.requestUpdate();
       };
 
-      sig.onMessage(async (msg) => {
+      sig.onMessage(async (msg: any) => {
+        if (msg.type === "peer_id") {
+          myPeerId = msg.peerId;
+        }
         if (msg.type === "offer") {
           await pc.setRemoteDescription({ type: "offer", sdp: msg.sdp });
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          sig.send({ type: "answer", sdp: answer.sdp ?? "" });
+          sig.send({
+            type: "answer",
+            sdp: answer.sdp ?? "",
+            peerId: myPeerId,
+          });
         }
         if (msg.type === "candidate" && pc.remoteDescription) {
           await pc.addIceCandidate(msg.candidate).catch(() => {});
@@ -80,13 +121,17 @@ export class P2PJoinModal extends LitElement {
       });
 
       await sig.joinRoom(code);
-      this.statusMsg = "Joining...";
 
       peer.onMessage((msg) => {
+        if (msg.type === "p2p_joined") {
+          this.players = msg.players ?? this.players;
+          this.requestUpdate();
+        }
         if (msg.type === "p2p_start") this.joinGame();
       });
     } catch (e) {
       this.statusMsg = `Failed: ${e}`;
+      this.phase = "form";
     }
   }
 
@@ -94,15 +139,10 @@ export class P2PJoinModal extends LitElement {
     const peer = this.peer;
     if (!peer) return;
 
-    const usernameInput = document.querySelector(
-      "username-input",
-    ) as UsernameInput | null;
-    const playerName = usernameInput?.getUsername() ?? "Player";
-
     p2pContext.setPeer(peer);
     peer.send({
       type: "p2p_join",
-      username: playerName,
+      username: this.playerName,
       clientID: peer.clientID ?? "",
     });
 
@@ -121,31 +161,47 @@ export class P2PJoinModal extends LitElement {
     this.close();
   }
 
+  private defaultConfig(): P2PLobbyConfig {
+    return {
+      gameMap: GameMapType.World,
+      gameMapSize: GameMapSize.Normal,
+      gameType: GameType.Singleplayer,
+      gameMode: GameMode.FFA,
+      difficulty: Difficulty.Medium,
+      bots: 3,
+      nations: "default",
+      infiniteGold: false,
+      infiniteTroops: false,
+      instantBuild: false,
+      donateGold: false,
+      donateTroops: false,
+      randomSpawn: false,
+    };
+  }
+
   render() {
-    if (!this.isOpen) return html``;
-
     return html`
-      <div
-        class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
-        @click=${(e: MouseEvent) => {
-          if (e.target === e.currentTarget) this.close();
-        }}
-      >
-        <div
-          class="bg-zinc-800 rounded-xl p-6 w-full max-w-sm mx-4 text-white shadow-2xl"
-        >
-          <div class="flex justify-between items-center mb-4">
-            <h2 class="text-lg font-bold">Join P2P Game</h2>
-            <button
-              @click=${this.close}
-              class="text-white/60 hover:text-white text-xl"
+      <!-- Join form -->
+      ${this.phase === "form"
+        ? html`
+            <div
+              class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
+              @click=${(e: MouseEvent) => {
+                if (e.target === e.currentTarget) this.close();
+              }}
             >
-              ✕
-            </button>
-          </div>
-
-          ${!this.connected
-            ? html`
+              <div
+                class="bg-zinc-800 rounded-xl p-6 w-full max-w-sm mx-4 text-white shadow-2xl"
+              >
+                <div class="flex justify-between items-center mb-4">
+                  <h2 class="text-lg font-bold">Join P2P Game</h2>
+                  <button
+                    @click=${this.close}
+                    class="text-white/60 hover:text-white text-xl"
+                  >
+                    ✕
+                  </button>
+                </div>
                 <div class="space-y-3">
                   <p class="text-sm text-white/70">
                     Enter the host's room code:
@@ -172,17 +228,66 @@ export class P2PJoinModal extends LitElement {
                     Connect
                   </button>
                 </div>
-              `
-            : html`
-                <div class="space-y-3 text-center">
-                  <p class="text-sm">${this.statusMsg}</p>
-                  <div
-                    class="w-6 h-6 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mx-auto"
-                  ></div>
+              </div>
+            </div>
+          `
+        : ""}
+
+      <!-- Connecting -->
+      ${this.phase === "connecting"
+        ? html`
+            <div
+              class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
+            >
+              <div
+                class="bg-zinc-800 rounded-xl p-6 w-full max-w-sm mx-4 text-white shadow-2xl text-center"
+              >
+                <div
+                  class="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin mx-auto mb-4"
+                ></div>
+                <p class="text-sm text-white/70">${this.statusMsg}</p>
+                <button
+                  @click=${this.close}
+                  class="mt-4 text-sm text-white/40 hover:text-white/70"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          `
+        : ""}
+
+      <!-- Lobby -->
+      ${this.phase === "lobby"
+        ? html`
+            <div
+              class="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60"
+            >
+              <div
+                class="bg-zinc-800 rounded-xl p-6 w-full max-w-lg mx-4 text-white shadow-2xl max-h-[90vh] overflow-y-auto"
+              >
+                <div class="flex justify-between items-center mb-4">
+                  <h2 class="text-lg font-bold">Game Lobby</h2>
+                  <button
+                    @click=${this.close}
+                    class="text-white/60 hover:text-white text-xl"
+                  >
+                    ✕
+                  </button>
                 </div>
-              `}
-        </div>
-      </div>
+                <p2p-lobby-screen
+                  .isHost=${false}
+                  .roomCode=${this.roomCode}
+                  .players=${this.players}
+                  .config=${this.defaultConfig()}
+                  .statusMsg=${this.statusMsg}
+                  .canStart=${false}
+                  .onLeave=${() => this.close()}
+                ></p2p-lobby-screen>
+              </div>
+            </div>
+          `
+        : ""}
     `;
   }
 }
